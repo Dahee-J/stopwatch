@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>스탑워치 · 하루가 흐르는 하늘</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    color: #fff;
+    background: #1b2a4e;
+  }
+  canvas#sky { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .panel {
+    position: fixed;
+    top: 7vh; left: 50%;
+    transform: translateX(-50%);
+    width: min(400px, calc(100% - 32px));
+    padding: 22px 24px 18px;
+    border-radius: 28px;
+    background: rgba(12, 18, 40, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.18);
+  }
+  .meta {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13px; letter-spacing: .5px; opacity: .9;
+    margin-bottom: 4px;
+  }
+  .day { font-weight: 700; letter-spacing: 2px; }
+  .phase { transition: opacity .4s; }
+
+  .time {
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(52px, 15vw, 78px);
+    font-weight: 300;
+    text-align: center;
+    text-shadow: 0 2px 18px rgba(0, 0, 0, 0.25);
+    margin: 4px 0 6px;
+  }
+  .time .ms { font-size: .55em; opacity: .7; }
+
+  /* 하루 진행 바 */
+  .daybar {
+    position: relative; height: 6px; border-radius: 3px;
+    background: linear-gradient(90deg,
+      #f4a582 0%, #7fbfff 15%, #5aa8ff 40%, #ff9a5a 50%,
+      #3a2f6b 60%, #0b1233 75%, #2a2d5e 92%, #f4a582 100%);
+    margin-bottom: 20px; opacity: .85;
+  }
+  .daybar .knob {
+    position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%;
+    background: #fff; transform: translate(-50%, -50%);
+    box-shadow: 0 0 10px rgba(255,255,255,.8);
+  }
+  .daybar .lapmark {
+    position: absolute; top: -3px; width: 2px; height: 12px;
+    background: rgba(255,255,255,.75); transform: translateX(-50%);
+    border-radius: 1px;
+  }
+
+  .buttons { display: flex; justify-content: space-between; gap: 14px; }
+  button {
+    flex: 1; height: 54px; border-radius: 27px;
+    border: 1px solid rgba(255,255,255,.3);
+    font-size: 16px; font-family: inherit; font-weight: 600;
+    color: #fff; cursor: pointer;
+    background: rgba(255,255,255,.14);
+    transition: background .2s, transform .08s, opacity .2s;
+  }
+  button:hover:not(:disabled) { background: rgba(255,255,255,.24); }
+  button:active:not(:disabled) { transform: scale(.97); }
+  button:disabled { opacity: .35; cursor: default; }
+  #startBtn { background: rgba(255, 196, 90, .38); border-color: rgba(255, 220, 150, .6); }
+  #startBtn:hover { background: rgba(255, 196, 90, .5); }
+  #startBtn.running { background: rgba(255, 110, 110, .35); border-color: rgba(255, 170, 170, .6); }
+
+  ul {
+    list-style: none; margin-top: 16px;
+    max-height: 28vh; overflow-y: auto;
+    scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.3) transparent;
+  }
+  ul:empty { display: none; }
+  li {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 6px;
+    border-top: 1px solid rgba(255,255,255,.14);
+    font-variant-numeric: tabular-nums; font-size: 15px;
+  }
+  li .icon { margin-right: 8px; }
+  li.best .t { color: #b8ffcf; }
+  li.worst .t { color: #ffc2c2; }
+  li.current { opacity: .75; }
+
+  .hint {
+    position: fixed; bottom: 14px; left: 0; right: 0;
+    text-align: center; font-size: 12px; color: rgba(255,255,255,.75);
+    text-shadow: 0 1px 4px rgba(0,0,0,.4);
+  }
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+
+<div class="panel">
+  <div class="meta">
+    <span class="day" id="day">DAY 1</span>
+    <span class="phase" id="phase">🌅 새벽</span>
+  </div>
+  <div class="time" id="display">00:00.<span class="ms">00</span></div>
+  <div class="daybar" id="daybar"><div class="knob" id="knob"></div></div>
+  <div class="buttons">
+    <button id="lapBtn" disabled>랩</button>
+    <button id="startBtn">시작</button>
+  </div>
+  <ul id="laps"></ul>
+</div>
+
+<p class="hint">1분 = 하루 · Space 시작/정지 · L 랩 · R 초기화</p>
+
+<script>
+/* ================= 스탑워치 로직 ================= */
+const DAY_MS = 60000;           // 1분이 하루
+const $ = id => document.getElementById(id);
+const display = $('display'), startBtn = $('startBtn'), lapBtn = $('lapBtn');
+const lapList = $('laps'), dayEl = $('day'), phaseEl = $('phase');
+const daybar = $('daybar'), knob = $('knob');
+
+let running = false, startTime = 0, elapsed = 0, lapStart = 0, laps = [];
+
+const now = () => running ? elapsed + (performance.now() - startTime) : elapsed;
+const pad = n => String(n).padStart(2, '0');
+function fmt(ms) {
+  const h = Math.floor(ms / 3600000), m = Math.floor(ms / 60000) % 60;
+  const s = Math.floor(ms / 1000) % 60, cs = Math.floor(ms / 10) % 100;
+  return { main: (h ? h + ':' + pad(m) : pad(m)) + ':' + pad(s), cs: pad(cs) };
+}
+
+function phaseInfo(p) {
+  if (p < 0.08 || p >= 0.92) return ['🌅', '새벽'];
+  if (p < 0.20) return ['🌤️', '아침'];
+  if (p < 0.42) return ['☀️', '한낮'];
+  if (p < 0.58) return ['🌇', '노을'];
+  return ['🌙', '밤'];
+}
+
+function renderLaps() {
+  lapList.innerHTML = '';
+  daybar.querySelectorAll('.lapmark').forEach(e => e.remove());
+  if (!running && elapsed === 0) return;
+
+  const cur = document.createElement('li');
+  cur.className = 'current';
+  cur.innerHTML = `<span><span class="icon">⏱️</span>랩 ${laps.length + 1}</span><span class="t"></span>`;
+  lapList.appendChild(cur);
+
+  const min = Math.min(...laps), max = Math.max(...laps);
+  let acc = 0;
+  const ends = laps.map(l => (acc += l));
+  for (let i = laps.length - 1; i >= 0; i--) {
+    const li = document.createElement('li');
+    if (laps.length >= 2) {
+      if (laps[i] === min) li.className = 'best';
+      else if (laps[i] === max) li.className = 'worst';
+    }
+    const [icon] = phaseInfo((ends[i] % DAY_MS) / DAY_MS);
+    const f = fmt(laps[i]);
+    li.innerHTML = `<span><span class="icon">${icon}</span>랩 ${i + 1}</span><span class="t">${f.main}.${f.cs}</span>`;
+    lapList.appendChild(li);
+  }
+  // 현재 하루(분) 안에 찍힌 랩은 진행바에 표시
+  const today = Math.floor(now() / DAY_MS);
+  ends.forEach(e => {
+    if (Math.floor(e / DAY_MS) === today) {
+      const m = document.createElement('div');
+      m.className = 'lapmark';
+      m.style.left = ((e % DAY_MS) / DAY_MS * 100) + '%';
+      daybar.appendChild(m);
+    }
+  });
+}
+
+function updateButtons() {
+  startBtn.textContent = running ? '정지' : (elapsed ? '계속' : '시작');
+  startBtn.classList.toggle('running', running);
+  lapBtn.disabled = !running && elapsed === 0;
+  lapBtn.textContent = running || elapsed === 0 ? '랩' : '초기화';
+}
+
+let lastDay = 0;
+function updateUI(t) {
+  const f = fmt(t);
+  display.innerHTML = `${f.main}.<span class="ms">${f.cs}</span>`;
+  const p = (t % DAY_MS) / DAY_MS;
+  const [icon, name] = phaseInfo(p);
+  const label = `${icon} ${name}`;
+  if (phaseEl.textContent !== label) phaseEl.textContent = label;
+  const d = Math.floor(t / DAY_MS);
+  dayEl.textContent = 'DAY ' + (d + 1);
+  if (d !== lastDay) { lastDay = d; renderLaps(); }
+  knob.style.left = (p * 100) + '%';
+  const cur = lapList.querySelector('li.current .t');
+  if (cur) { const l = fmt(t - lapStart); cur.textContent = `${l.main}.${l.cs}`; }
+}
+
+function toggle() {
+  if (running) { elapsed += performance.now() - startTime; running = false; }
+  else { startTime = performance.now(); running = true; }
+  updateButtons(); renderLaps();
+}
+function lap() {
+  if (!running) return;
+  const t = now(); laps.push(t - lapStart); lapStart = t;
+  renderLaps();
+  burst = { t: performance.now() };   // 랩을 찍으면 하늘에 반짝임
+}
+function reset() {
+  if (running) return;
+  elapsed = 0; lapStart = 0; laps = []; lastDay = 0;
+  renderLaps(); updateButtons();
+}
+
+startBtn.addEventListener('click', toggle);
+lapBtn.addEventListener('click', () => running ? lap() : reset());
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); toggle(); }
+  else if (e.key === 'l' || e.key === 'L') lap();
+  else if (e.key === 'r' || e.key === 'R') reset();
+});
+
+/* ================= 하늘 그리기 ================= */
+const canvas = $('sky'), ctx = canvas.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+
+// [위치, 하늘 위, 하늘 아래, 별 밝기, 먼 언덕, 가까운 언덕]
+const KEYS = [
+  [0.00, '#1b2a4e', '#f4a582', 0.35, '#3b3f6b', '#23264a'],
+  [0.08, '#4a7bc8', '#ffc98b', 0.00, '#5f7f86', '#3e5c58'],
+  [0.20, '#3a8ee6', '#a9d8ff', 0.00, '#6aa36f', '#4b8a52'],
+  [0.40, '#2f7fd8', '#bfe3ff', 0.00, '#6aa36f', '#4b8a52'],
+  [0.50, '#5b5aa8', '#ff9a5a', 0.00, '#7a5a6a', '#4a3a50'],
+  [0.58, '#2a2456', '#c0607a', 0.45, '#3a2f55', '#241d3d'],
+  [0.70, '#0a0f2c', '#1c2350', 1.00, '#151a38', '#0c1027'],
+  [0.88, '#0b1233', '#2a2d5e', 0.90, '#1c2045', '#10142e'],
+  [1.00, '#1b2a4e', '#f4a582', 0.35, '#3b3f6b', '#23264a'],
+];
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+KEYS.forEach(k => { for (const i of [1, 2, 4, 5]) k[i] = hex(k[i]); });
+const mix = (a, b, f) => a.map((v, i) => Math.round(v + (b[i] - v) * f));
+const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+function skyAt(p) {
+  let i = 0;
+  while (i < KEYS.length - 2 && p >= KEYS[i + 1][0]) i++;
+  const a = KEYS[i], b = KEYS[i + 1];
+  const f = (p - a[0]) / (b[0] - a[0]);
+  const e = f * f * (3 - 2 * f); // smoothstep
+  return {
+    top: mix(a[1], b[1], e), bottom: mix(a[2], b[2], e),
+    stars: a[3] + (b[3] - a[3]) * e,
+    far: mix(a[4], b[4], e), near: mix(a[5], b[5], e),
+  };
+}
+
+const rand = (a, b) => a + Math.random() * (b - a);
+const stars = Array.from({ length: 180 }, () => ({
+  x: Math.random(), y: Math.pow(Math.random(), 1.4) * 0.7,
+  r: rand(0.4, 1.6), ph: rand(0, Math.PI * 2), sp: rand(1, 3),
+}));
+const clouds = Array.from({ length: 6 }, (_, i) => ({
+  x0: i / 6 + rand(-0.05, 0.05), y: rand(0.08, 0.42),
+  s: rand(0.6, 1.3), sp: rand(0.008, 0.02),
+  puffs: Array.from({ length: 5 }, (_, j) => [j * 22 - 44 + rand(-6, 6), rand(-14, 4), rand(16, 28)]),
+}));
+const birds = Array.from({ length: 4 }, () => ({ off: rand(0, 1), y: rand(0.2, 0.4), sp: rand(0.03, 0.05) }));
+
+let shooting = null, burst = null;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+addEventListener('resize', resize);
+resize();
+
+const HORIZON = () => H * 0.74;
+function hillY(x, layer) {
+  const b = layer === 0 ? H * 0.70 : H * 0.80;
+  const a = layer === 0 ? H * 0.045 : H * 0.035;
+  const k = layer === 0 ? 0.004 : 0.006;
+  return b - a * Math.sin(x * k + layer * 2) - a * 0.6 * Math.sin(x * k * 2.3 + 1 + layer) - a * 0.3 * Math.sin(x * k * 5.1);
+}
+function drawHill(layer, color) {
+  ctx.beginPath(); ctx.moveTo(0, H);
+  for (let x = 0; x <= W + 8; x += 8) ctx.lineTo(x, hillY(x, layer));
+  ctx.lineTo(W, H); ctx.closePath();
+  ctx.fillStyle = rgb(color); ctx.fill();
+}
+
+function drawSun(p) {
+  const s = (p - 0.04) / 0.52;
+  if (s < 0 || s > 1) return;
+  const x = W * (0.06 + 0.88 * s);
+  const y = HORIZON() - Math.sin(Math.PI * s) * H * 0.58;
+  const low = 1 - Math.sin(Math.PI * s);            // 지평선 근처일수록 붉게
+  const core = mix([255, 244, 200], [255, 140, 70], low);
+  const R = Math.min(W, H) * 0.05 * (1 + low * 0.25);
+  const g = ctx.createRadialGradient(x, y, R * 0.5, x, y, R * 5);
+  g.addColorStop(0, rgb(core, 0.55)); g.addColorStop(1, rgb(core, 0));
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, R * 5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = rgb(core); ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawMoon(p, skyTop) {
+  const m = ((p - 0.56 + 1) % 1) / 0.48;
+  if (m < 0 || m > 1) return;
+  const x = W * (0.06 + 0.88 * m);
+  const y = HORIZON() - Math.sin(Math.PI * m) * H * 0.55;
+  const R = Math.min(W, H) * 0.038;
+  const g = ctx.createRadialGradient(x, y, R, x, y, R * 4);
+  g.addColorStop(0, 'rgba(230,235,255,.25)'); g.addColorStop(1, 'rgba(230,235,255,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, R * 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#f3f1e0'; ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(180,175,160,.35)';
+  [[-0.3, -0.2, 0.22], [0.25, 0.25, 0.16], [0.1, -0.4, 0.1]].forEach(([dx, dy, r]) => {
+    ctx.beginPath(); ctx.arc(x + dx * R, y + dy * R, r * R, 0, Math.PI * 2); ctx.fill();
+  });
+}
+
+function drawStars(alpha, real) {
+  if (alpha <= 0.01) return;
+  for (const s of stars) {
+    const tw = 0.6 + 0.4 * Math.sin(real / 1000 * s.sp + s.ph);
+    ctx.fillStyle = `rgba(255,255,255,${alpha * tw})`;
+    ctx.beginPath(); ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawClouds(t, day, bottomCol) {
+  if (day <= 0.02) return;
+  const tint = mix([255, 255, 255], bottomCol, 0.35);
+  for (const c of clouds) {
+    const x = (((c.x0 + t / 1000 * c.sp) % 1.3) + 1.3) % 1.3 * W - W * 0.15;
+    const y = c.y * H;
+    ctx.fillStyle = rgb(tint, 0.82 * day);
+    ctx.beginPath();
+    for (const [dx, dy, r] of c.puffs) {
+      ctx.moveTo(x + dx * c.s + r * c.s, y + dy * c.s);
+      ctx.arc(x + dx * c.s, y + dy * c.s, r * c.s, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+}
+
+function drawBirds(t, day) {
+  if (day < 0.5) return;
+  ctx.strokeStyle = `rgba(40,50,70,${(day - 0.5) * 1.2})`;
+  ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+  birds.forEach((b, i) => {
+    const x = ((b.off + t / 1000 * b.sp) % 1.2 - 0.1) * W;
+    const y = b.y * H + Math.sin(t / 700 + i) * 6;
+    const w = 7 + Math.sin(t / 120 + i * 2) * 3;
+    ctx.beginPath();
+    ctx.moveTo(x - 8, y - w * 0.5); ctx.quadraticCurveTo(x - 3, y - 2, x, y);
+    ctx.quadraticCurveTo(x + 3, y - 2, x + 8, y - w * 0.5);
+    ctx.stroke();
+  });
+}
+
+function drawHouse(night, color) {
+  const x = W * 0.74, base = hillY(x, 1) + 4;
+  const w = 46, h = 30;
+  ctx.fillStyle = rgb(color);
+  ctx.fillRect(x - w / 2, base - h, w, h);
+  ctx.beginPath(); ctx.moveTo(x - w / 2 - 6, base - h); ctx.lineTo(x, base - h - 22); ctx.lineTo(x + w / 2 + 6, base - h); ctx.fill();
+  ctx.fillRect(x + 10, base - h - 22, 7, 14); // 굴뚝
+  // 창문: 밤이면 불이 켜짐
+  const lit = Math.min(1, night * 1.3);
+  ctx.fillStyle = `rgba(255,214,120,${0.15 + 0.85 * lit})`;
+  ctx.fillRect(x - 15, base - h + 9, 10, 10);
+  ctx.fillRect(x + 5, base - h + 9, 10, 10);
+  if (lit > 0.2) {
+    const g = ctx.createRadialGradient(x, base - h + 14, 2, x, base - h + 14, 60);
+    g.addColorStop(0, `rgba(255,200,110,${0.25 * lit})`); g.addColorStop(1, 'rgba(255,200,110,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, base - h + 14, 60, 0, Math.PI * 2); ctx.fill();
+  }
+  // 나무 몇 그루
+  [[0.18, 1.0], [0.24, 0.8], [0.88, 0.9]].forEach(([fx, sc]) => {
+    const tx = W * fx, ty = hillY(tx, 1) + 3;
+    ctx.fillStyle = rgb(color);
+    ctx.fillRect(tx - 2.5 * sc, ty - 14 * sc, 5 * sc, 14 * sc);
+    ctx.beginPath(); ctx.moveTo(tx - 16 * sc, ty - 12 * sc); ctx.lineTo(tx, ty - 58 * sc); ctx.lineTo(tx + 16 * sc, ty - 12 * sc); ctx.fill();
+  });
+}
+
+function drawShooting(real, night) {
+  if (!shooting && running && night > 0.7 && Math.random() < 0.006) {
+    shooting = { t: real, x: rand(0.2, 0.9) * W, y: rand(0.05, 0.3) * H, len: rand(120, 220) };
+  }
+  if (!shooting) return;
+  const k = (real - shooting.t) / 900;
+  if (k > 1) { shooting = null; return; }
+  const dx = -k * 260, dy = k * 130;
+  const x = shooting.x + dx, y = shooting.y + dy;
+  const g = ctx.createLinearGradient(x, y, x + shooting.len * 0.9, y - shooting.len * 0.45);
+  g.addColorStop(0, `rgba(255,255,255,${1 - k})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.strokeStyle = g; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + shooting.len * 0.9, y - shooting.len * 0.45); ctx.stroke();
+}
+
+function drawBurst(real) {
+  if (!burst) return;
+  const k = (real - burst.t) / 600;
+  if (k > 1) { burst = null; return; }
+  ctx.fillStyle = `rgba(255,255,255,${0.18 * (1 - k)})`;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function frame(real) {
+  const t = now();
+  const p = (t % DAY_MS) / DAY_MS;
+  const sky = skyAt(p);
+  const night = sky.stars, day = 1 - Math.min(1, night * 1.6);
+
+  const g = ctx.createLinearGradient(0, 0, 0, HORIZON());
+  g.addColorStop(0, rgb(sky.top)); g.addColorStop(1, rgb(sky.bottom));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  drawStars(night, real);
+  drawShooting(real, night);
+  drawSun(p);
+  drawMoon(p, sky.top);
+  drawClouds(t, day, sky.bottom);
+  drawBirds(t, day);
+  drawHill(0, sky.far);
+  drawHill(1, sky.near);
+  drawHouse(night, sky.near);
+  drawBurst(real);
+
+  updateUI(t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
